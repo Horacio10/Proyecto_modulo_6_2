@@ -1,0 +1,355 @@
+---
+title: "Proyecto fin de modulo 6"
+author: "Teddy Horacio Alvarez Zarate"
+date: "2023-11-06"
+output: github_document
+---
+
+# Seccion A
+
+## Cargando las librerías
+
+
+```{r}
+library(tidyverse)
+library(foreign)
+library(dplyr)
+library(caret)
+library(ROCR)
+library(randomForest)
+library(e1071)
+library(ggplot2)
+
+```
+
+## Cargando la base de datos
+
+
+```{r }
+setwd("~/Experto en ciencia de datos/Modulo 6/Proyecto_modulo_6")
+
+datos <- read.spss("ENV_2017.sav", use.value.labels = FALSE, to.data.frame = TRUE)
+
+table(datos$prov_nac)
+
+datos$prov_nac <- as.numeric(as.character(datos$prov_nac))
+
+nuevadata <- datos%>%
+  filter(prov_nac==17)%>%
+  select(peso, talla, sem_gest, sexo, edad_mad, sabe_leer, con_pren)%>%
+  filter(peso!=99, talla!=99, sem_gest!=99, con_pren!=99, sabe_leer!=99, sabe_leer!=99)%>%
+  mutate(peso=if_else(peso>2500, 1,0),
+         sexo=if_else(sexo==1,0,1), sabe_leer=if_else(sabe_leer==1,1,0),
+         con_pren=if_else(con_pren>=7,1,0), edad2=edad_mad^2)
+
+hist(nuevadata$peso)
+
+
+```
+
+## Categorizando la variable de estudio
+
+```{r}
+nuevadata$peso <- factor(nuevadata$peso)
+
+nuevadata <- nuevadata%>%
+  mutate(peso=recode_factor(peso, `0`="no.adecuado", `1`="adecuado"))
+
+table(nuevadata$peso)
+
+```
+
+## Creamos una muestra de entrenamiento y realizamos un svm
+
+```{r}
+set.seed(1234)
+
+entrenamiento <- createDataPartition(nuevadata$peso, p=0.1, list = FALSE)
+
+modelo <- svm(peso~talla+sem_gest+sexo+edad_mad+edad2+sabe_leer, data = nuevadata[entrenamiento,], kernel ="linear", cost=10, scale=TRUE, probability=TRUE)
+
+modelo.tuneado <- tune(svm, peso~., data=nuevadata[entrenamiento,],ranges = list(cost=c(0.001, 0.01, 0.1, 1, 5,10,50)), kernel="linear", scale=TRUE, probability=TRUE)
+
+summary(modelo.tuneado)
+
+```
+
+## Graficando el performance de modelo
+
+```{r}
+ggplot(modelo.tuneado$performances, aes(x=cost, y=error))+
+  geom_line()+
+  geom_point()+
+  labs(title="Error de validadcion vs hiperparametro C")+
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+mejor.modelo <- modelo.tuneado$best.model
+
+summary(mejor.modelo)
+
+```
+
+#### El mejor modelo es el que tiene un costo de 10
+
+# Seccion B 
+## Evaluando integramente el modelo
+### Matriz de clasificación
+
+```{r}
+ajustados.mejor.modelo <- predict( mejor.modelo, nuevadata[entrenamiento,], type="prob", probability=TRUE)
+
+str(ajustados.mejor.modelo)
+
+head(attr(ajustados.mejor.modelo, "probabilities"),5)
+
+table(attr(ajustados.mejor.modelo, "probabilities")[,1]>0.5, nuevadata$peso[entrenamiento])
+
+levels(nuevadata$peso)
+
+confusionMatrix(ajustados.mejor.modelo, nuevadata$peso [entrenamiento], positive=levels(nuevadata$peso)[2])
+
+```
+
+#### Con el table calculado a partir de "ajustados mejor modelo" #### encontramos que 384 valores son ciertos positivos, es decir los #### 1 cuando son 1 y 4078 valores son ciertos positivos 0 cuando son 0
+#### De acuerdo a los indicadores obtenidos, de acuerdo al valor del #### accuracy, el modelo es perfecto, arrojando un valor de 93% y #### podemos ver tambien que las estimaciones que son mas altas a que clasifiquen correctamente los 1 (0,94) a que clasifiquen correctamente los 0, (0,82).
+
+### Curvas ROC
+
+```{r}
+pred <- prediction(attr(ajustados.mejor.modelo, "probabilities")[,2], nuevadata$peso[entrenamiento]) 
+
+perf <- performance(pred, "tpr", "fpr")
+
+plot(perf, colorize= TRUE, lty=3)
+abline(0,1, col="blue")
+
+```
+
+#### Y tal como se ve en la curva ROC la misma esta apegada tanto a #### los ejes horizontal superior y vertical izquierda, lo que muestra que el modelo esta clasificando bien
+
+```{r}
+aucmodelo1 <- performance(pred, measure = "auc")
+aucmodelo1<- aucmodelo1@y.values[[1]]
+aucmodelo1
+plot(performance(pred, measure = "sens", x.measure = "spec", colorize=TRUE))
+
+```
+
+#### Con el calculo del area bajo la curva, se puede ver que este arroja un valor de 0,928, que nos dice que el modelo funciona bien
+
+## Determinando los puntos de corte optimo
+
+### Determinando el punto de corte optimo bajo el criterio de maximizacion sensitividad y especificidad
+
+
+```{r}
+perf1 <- performance(pred, "sens", "spec")
+
+sen <- slot(perf1, "y.values" [[1]])
+
+esp <- slot(perf1, "x.values"[[1]])
+
+alf <- slot(perf1, "alpha.values"[[1]])
+
+mat <- data.frame(alf, sen, esp)
+
+library(reshape2)
+
+names(mat)[1] <- "alf"
+
+names(mat)[2] <- "sen"
+
+names(mat)[3] <- "esp"
+
+m <- melt(mat, id=c("alf"))
+
+p1 <- ggplot(m, aes(alf, value, group=variable, colour=variable))+
+  geom_line(size=1.2)+
+  labs(title = "Punto de corte optimo", x="cut-off", y="")
+
+p1
+
+library(plotly)
+
+ggplotly(p1)
+
+```
+
+#### Usando e criterio en le cual se intersectan las curvas de
+#### especificidas y sensitividad, el punto de corte optimo es 
+#### aproximadamente de 8%. En este caso se estarian clasificando #### mas los 1 que los 0, ya que el punto de corte es muy bajo
+
+### Usando el criterio de maximizacion de accuracy
+
+```{r}
+max.accuracy <- performance(pred, measure = "acc")
+
+indice <- which.max(slot(max.accuracy, "y.values")[[1]])
+
+acc <- slot(max.accuracy, "y.values")[[1]][indice]
+
+cutoff <- slot(max.accuracy, "x.values")[[1]][indice]
+
+print(c(accuracy=acc, cutoff=cutoff))
+
+```
+
+#### Usando el criterio de maximizacion del accuracy del modelo, Donde el punto de corte optimo es de 0.51
+
+### Usando el criterio de maximizacion de la curva ROC
+
+
+```{r}
+library(ROCR)
+
+prediccionescutoff <- attr(ajustados.mejor.modelo, "probabilities")[,1]
+
+library(pROC)
+
+curvaroc <- plot.roc(nuevadata$peso[entrenamiento], as.vector(prediccionescutoff), precent=TRUE, ci=TRUE, print.auc=TRUE, threholds="best", print.thres="best")
+
+```
+
+#### Donde el punto de corte optimo es de 84%
+
+### Evaluando el modelo con el nuevo punto de corte
+
+```{r}
+ajustados.mejor.modelo <- predict( mejor.modelo, nuevadata[entrenamiento,], type="prob", probability=TRUE)
+
+str(ajustados.mejor.modelo)
+
+head(attr(ajustados.mejor.modelo, "probabilities"),5)
+
+table(attr(ajustados.mejor.modelo, "probabilities")[,1]>0.84, nuevadata$peso[entrenamiento])
+
+levels(nuevadata$peso)
+
+confusionMatrix(ajustados.mejor.modelo, nuevadata$peso [entrenamiento], positive=levels(nuevadata$peso)[2])
+
+```
+
+### Curvas ROC
+
+```{r}
+pred <- prediction(attr(ajustados.mejor.modelo, "probabilities")[,2], nuevadata$peso[entrenamiento]) 
+
+perf <- performance(pred, "tpr", "fpr")
+
+plot(perf, colorize= TRUE, lty=3)
+abline(0,1, col="blue")
+
+```
+
+### Midiendo el area bajo la curva
+
+```{r}
+aucmodelo1 <- performance(pred, measure = "auc")
+aucmodelo1<- aucmodelo1@y.values[[1]]
+aucmodelo1
+plot(performance(pred, measure = "sens", x.measure = "spec", colorize=TRUE))
+
+```
+
+## Generando un data frame con un vector fila y k variables con un punto de corte de 0.5 y pronosticando para el modelo
+
+```{r}
+nuevadata2 <- data.frame(talla=40, sem_gest=35, sexo=1, edad_mad=35, sabe_leer=1, con_pren=1, edad2=900)
+
+newdata2 <- nuevadata2
+
+pronostico2 <- predict(mejor.modelo, newdata2, probability = TRUE)
+
+pronostico2
+
+```
+
+#### Entonces la probabilidad de que el niño nazca con peso adecuado #### es del 2%, bajo las caracteristicas de la base de datos fuera de la muestra
+
+### Pronosticando con el punto de corte seleccionado
+
+```{r}
+umbral <- as.numeric(cutoff)
+
+table(attr(ajustados.mejor.modelo, "probabilities")[,1]>umbral, nuevadata$peso[entrenamiento])
+
+```
+
+#Seccion C
+## Realizando un remuestreo usando la metodología ROSE y construye un SVM usando cross-validation.
+
+```{r}
+library(ROSE)
+
+train_data <- nuevadata[entrenamiento,]
+
+table(train_data$peso)
+
+roses <- ROSE(peso~., data = train_data, seed = 1)$data
+
+table(roses$peso)
+
+modelo.rose <- tune(svm, peso~., data=roses, ranges=list(cost=c(0.001, 0.01, 0.1, 1, 5,10,50)),kernel="linear", scale=TRUE, probability=TRUE)
+
+```
+
+#### Se puede ver que no existe desproporcion ya que existen 2463 valores como "adecuado" y 2322 valores como "no.adecuado"
+
+```{r}
+mejor.modelo.rose <- modelo.rose$best.model
+
+ajustadosrose <- predict(mejor.modelo.rose, roses, type="prob", probability = TRUE)
+
+```
+
+###Construimos la matriz de confusión
+
+```{r}
+confusionMatrix(roses$peso, ajustadosrose, dnn = c("Actuales", "Predicho"), levels(ajustadosrose)[1])
+```
+
+#### La matriz de confusion arroja un accuracy de 83% que es 
+#### bastante bueno y una y una sensitividad y especificidad del 81% #### y 86% respectivamente, que tambien son bastante altos y donde los 1 clasifica en un 87% y los 0 en 79%
+
+### Curva ROC
+
+```{r}
+predrose <- prediction(attr(ajustadosrose, "probabilities")[,2],roses$peso)
+
+
+roc.curve(nuevadata$peso[entrenamiento], attr(ajustados.mejor.modelo, "probabilities")[,2], col="green")
+
+roc.curve(roses$peso, attr(ajustadosrose, "probabilities")[,2], col="red")
+
+nuevadata3 <- data.frame(talla=39, sem_gest=40, sexo=1, edad_mad=25, sabe_leer=1, con_pren=1, edad2=900)
+
+newdata3 <- nuevadata3
+
+pronostico3 <- predict(mejor.modelo.rose, newdata3, probability = TRUE)
+
+pronostico3
+
+```
+
+
+#### Bajo las caracteristicas seleccionadas en el vector para 
+#### realizar la prediccion la probabilidad de que nazca con peso adecuado es del 4%
+
+
+### En un dataframe, une los siguientes resultados: Pronóstico del ### modelo tuneado sin remuestreo y con punto de corte óptimo; pronóstico del modelo con remuestreo y con punto de corte óptimo seleccionado.
+
+```{r}
+comparacion <- data.frame(sin_rem=ajustados.mejor.modelo, rem=ajustadosrose)
+```
+
+#### En el data.frame "comparacion" se pueden ver que hay algunos errores que se tendrian que minimizar, ya que no existe modelos precisos
+
+
+
+
+
+
+
+
